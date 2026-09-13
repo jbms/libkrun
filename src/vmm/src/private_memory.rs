@@ -31,6 +31,7 @@ pub struct PrivateMemoryRegion {
 pub struct PrivateMemoryBacking {
     file: Arc<File>,
     regions: Vec<PrivateMemoryRegion>,
+    capture_baseline: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -109,10 +110,26 @@ impl PrivateMemoryBacking {
             let backing = Self {
                 file: Arc::new(file),
                 regions,
+                capture_baseline: false,
             };
             backing.validate()?;
             Ok(backing)
         }
+    }
+
+    /// Retain this image as the new VM's initial incremental-capture baseline.
+    ///
+    /// Construction arms CPU and host-writer tracking before execution/device restore. No RAM
+    /// scan or copy is performed. The embedding runtime must retain this exact immutable image
+    /// and associate it with the new VM's `retained_memory_baseline()` token, never the source
+    /// VM's token. Construction fails if tracking cannot be established.
+    pub fn with_capture_baseline(mut self) -> Self {
+        self.capture_baseline = true;
+        self
+    }
+
+    pub(crate) fn retains_capture_baseline(&self) -> bool {
+        self.capture_baseline
     }
 
     /// Map the complete image without reading or copying its RAM-sized contents.
@@ -312,6 +329,9 @@ mod tests {
             regions[0].length as usize,
         )];
         let backing = PrivateMemoryBacking::new(readonly, regions.clone()).unwrap();
+        assert!(!backing.retains_capture_baseline());
+        let backing = backing.with_capture_baseline();
+        assert!(backing.retains_capture_baseline());
         let first = backing.map(&expected).unwrap();
         let second = backing.map(&expected).unwrap();
         drop(backing);

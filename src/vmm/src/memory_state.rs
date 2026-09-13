@@ -312,6 +312,22 @@ impl MemoryGenerationLedger {
         self.plan_capture(MemoryCaptureKind::Full, Vec::new())
     }
 
+    /// Bind a freshly mapped immutable image after both writer trackers have been armed.
+    /// Only construction may do this: no existing generation can be replaced by an unobserved
+    /// image. The token belongs to this ledger even when the image came from another VM.
+    pub(crate) fn initialize_from_backing(&mut self) -> Result<MemoryBaselineToken> {
+        if self.next_generation != 1 || self.published.is_some() || self.pending.is_some() {
+            return Err(Error::StaleCapture);
+        }
+        let generation = MemoryGeneration(self.next_generation);
+        self.next_generation += 1;
+        self.published = Some(generation);
+        self.dirty_coverage_valid = true;
+        Ok(self
+            .retained_baseline()
+            .expect("initialized backing baseline"))
+    }
+
     /// Plans capture relative to the latest retained baseline.
     ///
     /// Ranges may overlap or be adjacent. The returned plan sorts and coalesces them off the
@@ -494,6 +510,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherited_baseline_has_child_identity_and_preserves_first_delta() {
+        let mut parent = MemoryGenerationLedger::new(MemoryTopologyGeneration::new(1));
+        let parent_token = parent.initialize_from_backing().unwrap();
+        let mut child = MemoryGenerationLedger::new(MemoryTopologyGeneration::new(1));
+        let child_token = child.initialize_from_backing().unwrap();
+        assert_ne!(parent_token, child_token);
+        assert_eq!(
+            child.incremental_full_reason(parent_token),
+            Some(FullCaptureReason::DifferentTracker)
+        );
+        let changed = GuestMemoryRange::new(4096, 4096).unwrap();
+        let IncrementalCaptureDecision::Incremental(plan) = child
+            .plan_incremental_capture(child_token, [changed])
+            .unwrap()
+        else {
+            panic!("expected delta")
+        };
+        assert_eq!(plan.changed_ranges(), &[changed]);
+        assert_eq!(plan.generation().get(), 2);
+        child.abandon(&plan).unwrap();
+        assert_eq!(child.retained_baseline(), Some(child_token));
+        assert!(child.initialize_from_backing().is_err());
+        child.replace_topology(MemoryTopologyGeneration::new(2));
+        assert!(child.retained_baseline().is_none());
+        assert!(child.initialize_from_backing().is_err());
+    }
+
+    #[test]
+    fn inherited_baseline_cannot_replace_a_started_capture() {
+        let mut ledger = MemoryGenerationLedger::new(MemoryTopologyGeneration::new(1));
+        let plan = ledger.plan_full_capture().unwrap();
+        assert!(ledger.initialize_from_backing().is_err());
+        ledger.abandon(&plan).unwrap();
+        assert!(ledger.initialize_from_backing().is_err());
+        assert!(ledger.retained_baseline().is_none());
+    }
 
     #[test]
     fn lost_backend_coverage_requires_full_rebase_even_after_abandon() {
