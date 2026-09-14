@@ -1582,6 +1582,39 @@ impl Vmm {
         Ok(())
     }
 
+    /// Construction-only baseline adoption, before devices or restored CPU state can write RAM.
+    /// The builder has already mapped and validated the complete immutable image. In particular,
+    /// do not move this to after execution restore: resetting trackers then would lose writes.
+    #[cfg(not(feature = "tee"))]
+    fn initialize_backing_memory_baseline(&mut self) -> Result<()> {
+        self.memory_access
+            .freeze(VCPU_CONTROL_TIMEOUT)
+            .map_err(Error::MemoryAccessDomain)?;
+        self.memory_access
+            .configure_tracking(
+                self.guest_memory
+                    .iter()
+                    .map(|region| devices::virtio::HostMemoryRange {
+                        start: region.start_addr().raw_value(),
+                        length: region.len(),
+                    })
+                    .collect(),
+            )
+            .map_err(Error::MemoryAccessDomain)?;
+        self.vm.begin_dirty_tracking().map_err(Error::Vm)?;
+        self.memory_tracking_active = true;
+        self.memory_access
+            .begin_tracking()
+            .map_err(Error::MemoryAccessDomain)?;
+        self.memory_ledger
+            .initialize_from_backing()
+            .map_err(Error::MemoryState)?;
+        // The private image replaces eager materialization. Reject later untracked streaming
+        // writes through the construction-only restore target instead of corrupting the baseline.
+        self.memory_restore_allowed = false;
+        Ok(())
+    }
+
     /// Plans a complete guest-memory generation at the current paused boundary.
     pub fn plan_full_memory_capture(&mut self) -> Result<MemoryCapturePlan> {
         self.require_paused_memory_boundary()?;

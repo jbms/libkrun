@@ -1852,6 +1852,19 @@ pub fn build_microvm_paused(
         pio_device_manager,
     };
 
+    // The inherited mapping is still pristine here. Arm tracking before attaching workers or
+    // installing restored execution/device state; child writes must never change this baseline.
+    #[cfg(not(feature = "tee"))]
+    if vm_resources
+        .private_memory_backing
+        .as_ref()
+        .is_some_and(|backing| backing.retains_capture_baseline())
+    {
+        vmm.initialize_backing_memory_baseline()
+            .map_err(StartMicrovmError::Internal)?;
+        trace.mark("memory.inherited_baseline");
+    }
+
     // Set raw mode for FDs that are connected to legacy serial devices.
     #[cfg(not(target_os = "windows"))]
     for serial_tty in serial_ttys {
