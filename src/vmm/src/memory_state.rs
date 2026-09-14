@@ -315,6 +315,7 @@ impl MemoryGenerationLedger {
     /// Bind a freshly mapped immutable image after both writer trackers have been armed.
     /// Only construction may do this: no existing generation can be replaced by an unobserved
     /// image. The token belongs to this ledger even when the image came from another VM.
+    #[cfg(any(test, not(feature = "tee")))]
     pub(crate) fn initialize_from_backing(&mut self) -> Result<MemoryBaselineToken> {
         if self.next_generation != 1 || self.published.is_some() || self.pending.is_some() {
             return Err(Error::StaleCapture);

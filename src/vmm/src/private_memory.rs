@@ -128,6 +128,7 @@ impl PrivateMemoryBacking {
         self
     }
 
+    #[cfg(any(test, not(feature = "tee")))]
     pub(crate) fn retains_capture_baseline(&self) -> bool {
         self.capture_baseline
     }

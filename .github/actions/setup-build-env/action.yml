@@ -27,8 +27,9 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: |
+        # Tapping validates formulae, so trust this existing dependency tap first.
+        brew trust --tap slp/krun
         brew tap slp/krun
-        brew trust slp/krun
         brew install virglrenderer llvm
 
     - name: Install packages (Linux)
