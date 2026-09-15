@@ -536,26 +536,27 @@ impl PassthroughFs {
     }
 
     fn open_inode_or_path(&self, inode: Inode, flags: i32) -> io::Result<FileOrLink> {
-        match self.open_inode(inode, flags) {
-            Ok(a) => Ok(FileOrLink::File(a)),
-            Err(e) => {
-                if e.raw_os_error() == Some(libc::ELOOP) {
-                    let data = self
-                        .inodes
-                        .read()
-                        .unwrap()
-                        .get(&inode)
-                        .cloned()
-                        .ok_or_else(ebadf)?;
+        let data = self
+            .inodes
+            .read()
+            .unwrap()
+            .get(&inode)
+            .cloned()
+            .ok_or_else(ebadf)?;
 
-                    let pathname = CString::new(format!("/proc/self/fd/{}", data.file.as_raw_fd()))
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    Ok(FileOrLink::Link(pathname))
-                } else {
-                    Err(e)
-                }
-            }
+        // `open_inode` re-opens the inode through `/proc/self/fd`, following the
+        // inode. For a symlink that follows the link in *this* process, which
+        // can fail with `ELOOP` (or silently resolve to the target) for
+        // absolute or cross-mount targets. Detect symlinks from their own
+        // attributes instead, and hand back the `/proc/self/fd` path so the
+        // caller can use the `l*` family of syscalls on the link itself.
+        if stat(&data.file)?.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            let pathname = CString::new(format!("/proc/self/fd/{}", data.file.as_raw_fd()))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            return Ok(FileOrLink::Link(pathname));
         }
+
+        self.open_inode(inode, flags).map(FileOrLink::File)
     }
 
     fn do_lookup(&self, parent: Inode, name: &CStr) -> io::Result<Entry> {
@@ -2267,5 +2268,68 @@ impl FileSystem for PassthroughFs {
             }
             _ => Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_fs(root: &std::path::Path) -> PassthroughFs {
+        let cfg = Config {
+            root_dir: root.to_string_lossy().into_owned(),
+            xattr: true,
+            ..Default::default()
+        };
+        let fs = PassthroughFs::new(cfg).expect("construct passthrough fs");
+        fs.init(FsOptions::empty()).expect("init passthrough fs");
+        fs
+    }
+
+    fn lookup(fs: &PassthroughFs, name: &str) -> u64 {
+        let ctx = Context {
+            uid: 0,
+            gid: 0,
+            pid: 0,
+        };
+        let name = CString::new(name).unwrap();
+        fs.lookup(ctx, fuse::ROOT_ID, &name).expect("lookup").inode
+    }
+
+    #[test]
+    fn open_inode_or_path_keeps_symlinks_unresolved() {
+        let dir =
+            std::env::temp_dir().join(format!("msb-krun-virtiofs-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A regular file, and a symlink to an absolute path that exists: a
+        // follow-open would hand back the *target*, hiding the link (and, for
+        // targets that cannot be followed from this process, fail with
+        // ELOOP).
+        std::fs::write(dir.join("regular"), b"x").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", dir.join("link")).unwrap();
+
+        let fs = init_fs(&dir);
+
+        let link = lookup(&fs, "link");
+        assert!(
+            matches!(
+                fs.open_inode_or_path(link, libc::O_RDONLY).unwrap(),
+                FileOrLink::Link(_)
+            ),
+            "a symlink must be opened as a link, not as its target"
+        );
+
+        let regular = lookup(&fs, "regular");
+        assert!(
+            matches!(
+                fs.open_inode_or_path(regular, libc::O_RDONLY).unwrap(),
+                FileOrLink::File(_)
+            ),
+            "a regular file must be opened"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
