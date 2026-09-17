@@ -475,6 +475,10 @@ impl VmResources {
             vcpu_count,
             max_vcpu_count: self.vm_config().max_vcpu_count.unwrap_or(vcpu_count),
             ht_enabled: self.vm_config().ht_enabled.unwrap(),
+            // Acted on by the Linux/KVM x86_64 backend (guest-CPUID mask),
+            // Windows/WHP x86_64 (trapped-CPUID mask) and macOS/HVF;
+            // Linux/aarch64 does not expose nested virtualization at all.
+            nested_enabled: self.nested_enabled,
             cpu_template: self.vm_config().cpu_template,
         }
     }
@@ -755,6 +759,7 @@ mod tests {
             vcpu_count: vm_resources.vm_config().vcpu_count.unwrap(),
             max_vcpu_count: vm_resources.vm_config().vcpu_count.unwrap(),
             ht_enabled: vm_resources.vm_config().ht_enabled.unwrap(),
+            nested_enabled: vm_resources.nested_enabled,
             cpu_template: vm_resources.vm_config().cpu_template,
         };
 
