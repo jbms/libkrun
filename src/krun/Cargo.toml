@@ -9,6 +9,12 @@ license = "Apache-2.0"
 
 [features]
 default = []
+# Link the krunfw kernel accessor into the embedding program instead of
+# loading libkrunfw with `dlopen`. The embedder must provide a
+# `krunfw_get_kernel_for_path(const char *path)` C function returning the
+# `krunfw_get_kernel` accessor for the selected image (see
+# `load_krunfw_library`).
+static-krunfw = []
 net = ["devices/net", "vmm/net"]
 blk = ["devices/blk", "vmm/blk"]
 gpu = ["krun_display", "devices/gpu", "vmm/gpu"]
