@@ -424,6 +424,8 @@ pub struct VcpuConfig {
     pub max_vcpu_count: u8,
     /// Enable hyperthreading in the CPUID configuration.
     pub ht_enabled: bool,
+    /// Enable nested virtualization in the CPUID configuration.
+    pub nested_enabled: bool,
     /// CPUID template to use.
     pub cpu_template: Option<CpuFeaturesTemplate>,
 }
@@ -1405,6 +1407,7 @@ mod tests {
             vcpu_count: 1,
             max_vcpu_count: 1,
             ht_enabled: false,
+            nested_enabled: false,
             cpu_template: None,
         };
 

@@ -4133,7 +4133,7 @@ fn create_vcpus_windows(
                 metrics.clone(),
             )
             .map_err(Error::Vcpu)?;
-        vcpu.configure_windows(guest_mem, mem_info, entry_addr)
+        vcpu.configure_windows(guest_mem, mem_info, entry_addr, vcpu_config.nested_enabled)
             .map_err(Error::Vcpu)?;
         #[cfg(target_arch = "x86_64")]
         {
@@ -5392,6 +5392,7 @@ pub mod tests {
             vcpu_count,
             max_vcpu_count: vcpu_count,
             ht_enabled: false,
+            nested_enabled: false,
             cpu_template: None,
         };
 
@@ -5429,6 +5430,7 @@ pub mod tests {
             vcpu_count,
             max_vcpu_count: vcpu_count,
             ht_enabled: false,
+            nested_enabled: false,
             cpu_template: None,
         };
 
