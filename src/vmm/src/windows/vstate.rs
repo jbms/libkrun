@@ -535,6 +535,9 @@ pub struct VcpuConfig {
     /// has no parked-vcpu bring-up; wider capacity is rejected at config time.
     pub max_vcpu_count: u8,
     pub ht_enabled: bool,
+    /// Enable nested virtualization in the CPUID configuration; the WHP
+    /// backend masks VMX/SVM out of trapped CPUID results when this is false.
+    pub nested_enabled: bool,
     pub cpu_template: Option<CpuFeaturesTemplate>,
 }
 
@@ -549,6 +552,8 @@ pub struct Vcpu {
     pio_bus: Option<devices::Bus>,
     #[cfg(target_arch = "x86_64")]
     sipi_router: Option<Arc<ApStartupRouter>>,
+    #[cfg(target_arch = "x86_64")]
+    nested_enabled: bool,
     exit_evt: EventFd,
     metrics: MetricsWriter,
     event_sender: Option<Sender<VcpuEvent>>,
@@ -1305,6 +1310,8 @@ impl Vcpu {
             pio_bus: None,
             #[cfg(target_arch = "x86_64")]
             sipi_router: None,
+            #[cfg(target_arch = "x86_64")]
+            nested_enabled: false,
             exit_evt,
             metrics,
             event_sender: Some(event_sender),
@@ -1340,6 +1347,7 @@ impl Vcpu {
         guest_mem: &GuestMemoryMmap,
         mem_info: &ArchMemoryInfo,
         entry_addr: GuestAddress,
+        _nested_enabled: bool,
     ) -> Result<()> {
         self.guest_mem = Some(guest_mem.clone());
         self.configure_aarch64(entry_addr, mem_info.fdt_addr)
@@ -1351,7 +1359,9 @@ impl Vcpu {
         guest_mem: &GuestMemoryMmap,
         _mem_info: &ArchMemoryInfo,
         entry_addr: GuestAddress,
+        nested_enabled: bool,
     ) -> Result<()> {
+        self.nested_enabled = nested_enabled;
         self.guest_mem = Some(guest_mem.clone());
         self.configure_x86_64(guest_mem, entry_addr)
     }
@@ -1387,6 +1397,8 @@ impl Vcpu {
         let pio_bus = self.pio_bus.take();
         #[cfg(target_arch = "x86_64")]
         let sipi_router = self.sipi_router.take();
+        #[cfg(target_arch = "x86_64")]
+        let nested_enabled = self.nested_enabled;
         let exit_evt = self.exit_evt.try_clone().map_err(Error::VcpuThreadSpawn)?;
         let metrics = self.metrics.clone();
         self.partition_handle = 0;
@@ -1411,6 +1423,8 @@ impl Vcpu {
                         pio_bus,
                         #[cfg(target_arch = "x86_64")]
                         sipi_router,
+                        #[cfg(target_arch = "x86_64")]
+                        nested_enabled,
                         exit_evt,
                         metrics,
                         event_receiver,
@@ -2664,6 +2678,7 @@ fn run_vcpu(
     mmio_bus: Option<devices::Bus>,
     #[cfg(target_arch = "x86_64")] pio_bus: Option<devices::Bus>,
     #[cfg(target_arch = "x86_64")] sipi_router: Option<Arc<ApStartupRouter>>,
+    #[cfg(target_arch = "x86_64")] nested_enabled: bool,
     exit_evt: EventFd,
     metrics: MetricsWriter,
     event_receiver: Receiver<VcpuEvent>,
@@ -2852,7 +2867,7 @@ fn run_vcpu(
         if reason == WHvRunVpExitReasonX64Cpuid {
             let cpuid = unsafe { exit_context.Anonymous.CpuidAccess };
             let vcpu_count = sipi_router.as_ref().map_or(1, |router| router.vcpu_count());
-            let result = normalize_cpuid(id, vcpu_count, &cpuid);
+            let result = normalize_cpuid(id, vcpu_count, nested_enabled, &cpuid);
             // The VpContext bitfield's low nibble is the instruction length.
             let next_rip =
                 exit_context.VpContext.Rip + u64::from(exit_context.VpContext._bitfield & 0xf);
@@ -2956,11 +2971,21 @@ struct CpuidResult {
 /// IDs and topology derived from the vCPU count, the hypervisor-present
 /// bit, and no x2APIC (the local APIC emulation mode is xAPIC-only). Guest
 /// boot paths must not vary with the host CPU vendor or WHP build defaults.
+///
+/// When nested virtualization is disabled the VMX (Intel) and SVM (AMD)
+/// feature bits are cleared as well, so the guest cannot run its own VMs.
 #[cfg(target_arch = "x86_64")]
-fn normalize_cpuid(id: u8, vcpu_count: u8, access: &WHV_X64_CPUID_ACCESS_CONTEXT) -> CpuidResult {
+fn normalize_cpuid(
+    id: u8,
+    vcpu_count: u8,
+    nested_enabled: bool,
+    access: &WHV_X64_CPUID_ACCESS_CONTEXT,
+) -> CpuidResult {
+    const CPUID_1_ECX_VMX: u32 = 1 << 5;
     const CPUID_1_ECX_X2APIC: u32 = 1 << 21;
     const CPUID_1_ECX_HYPERVISOR: u32 = 1 << 31;
     const CPUID_1_EDX_HTT: u32 = 1 << 28;
+    const CPUID_8000_0001_ECX_SVM: u32 = 1 << 2;
 
     let leaf = access.Rax as u32;
     let subleaf = access.Rcx as u32;
@@ -2987,6 +3012,9 @@ fn normalize_cpuid(id: u8, vcpu_count: u8, access: &WHV_X64_CPUID_ACCESS_CONTEXT
             let mut ecx = result.rcx as u32;
             ecx |= CPUID_1_ECX_HYPERVISOR;
             ecx &= !CPUID_1_ECX_X2APIC;
+            if !nested_enabled {
+                ecx &= !CPUID_1_ECX_VMX;
+            }
             result.rcx = u64::from(ecx);
 
             let mut edx = result.rdx as u32;
@@ -3021,6 +3049,13 @@ fn normalize_cpuid(id: u8, vcpu_count: u8, access: &WHV_X64_CPUID_ACCESS_CONTEXT
                 result.rbx = 1; // ratio numerator
                 result.rcx = tsc_hz; // "crystal" clock in Hz
                 result.rdx = 0;
+            }
+        }
+        // AMD extended features: drop SVM unless nested virtualization is on.
+        0x8000_0001 => {
+            if !nested_enabled {
+                let ecx = result.rcx as u32 & !CPUID_8000_0001_ECX_SVM;
+                result.rcx = u64::from(ecx);
             }
         }
         _ => {}
@@ -3641,6 +3676,38 @@ mod tests {
             Ok(Some(0x42))
         );
         assert!(*router.slots[1].lock().unwrap() == ApParkState::Running);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn normalize_cpuid_masks_nested_virt_when_disabled() {
+        let leaf1 = WHV_X64_CPUID_ACCESS_CONTEXT {
+            Rax: 0x1,
+            DefaultResultRcx: 1 << 5,
+            ..Default::default()
+        };
+        let result = normalize_cpuid(0, 1, false, &leaf1);
+        assert_eq!(result.rcx as u32 & (1 << 5), 0, "VMX must be cleared");
+
+        let leaf_8000_0001 = WHV_X64_CPUID_ACCESS_CONTEXT {
+            Rax: 0x8000_0001,
+            DefaultResultRcx: 1 << 2,
+            ..Default::default()
+        };
+        let result = normalize_cpuid(0, 1, false, &leaf_8000_0001);
+        assert_eq!(result.rcx as u32 & (1 << 2), 0, "SVM must be cleared");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn normalize_cpuid_keeps_nested_virt_when_enabled() {
+        let access = WHV_X64_CPUID_ACCESS_CONTEXT {
+            Rax: 0x1,
+            DefaultResultRcx: 1 << 5,
+            ..Default::default()
+        };
+        let result = normalize_cpuid(0, 1, true, &access);
+        assert_eq!(result.rcx as u32 & (1 << 5), 1 << 5, "VMX must be kept");
     }
 
     #[test]

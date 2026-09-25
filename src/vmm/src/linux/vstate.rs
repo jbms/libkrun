@@ -1240,6 +1240,8 @@ pub struct VcpuConfig {
     pub max_vcpu_count: u8,
     /// Enable hyperthreading in the CPUID configuration.
     pub ht_enabled: bool,
+    /// Enable nested virtualization in the CPUID configuration.
+    pub nested_enabled: bool,
     /// CPUID template to use.
     pub cpu_template: Option<CpuFeaturesTemplate>,
 }
@@ -1551,8 +1553,10 @@ impl Vcpu {
         vcpu_config: &VcpuConfig,
         kernel_boot: bool,
     ) -> Result<()> {
-        let cpuid_vm_spec = VmSpec::new(self.id, vcpu_config.vcpu_count, vcpu_config.ht_enabled)
-            .map_err(Error::CpuId)?;
+        let mut cpuid_vm_spec =
+            VmSpec::new(self.id, vcpu_config.vcpu_count, vcpu_config.ht_enabled)
+                .map_err(Error::CpuId)?;
+        cpuid_vm_spec.set_nested_enabled(vcpu_config.nested_enabled);
 
         filter_cpuid(&mut self.cpuid, &cpuid_vm_spec).map_err(|e| {
             error!("Failure in configuring CPUID for vcpu {}: {:?}", self.id, e);
@@ -2765,6 +2769,7 @@ mod tests {
             vcpu_count: 1,
             max_vcpu_count: 1,
             ht_enabled: false,
+            nested_enabled: false,
             cpu_template: None,
         };
 
